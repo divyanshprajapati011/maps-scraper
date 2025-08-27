@@ -122,33 +122,56 @@ app.post("/api/scrape", auth, async (req, res) => {
 
   let browser;
   try {
+    console.log("Launching Chromium...");
+
+    // Launch puppeteer with Render-safe flags
     browser = await puppeteer.launch({
-      args: chromium.args,
+      args: [
+        ...chromium.args,
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+        "--disable-gpu",
+      ],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
-      ignoreHTTPSErrors: true
+      ignoreHTTPSErrors: true,
     });
 
     const page = await browser.newPage();
-    await page.setDefaultNavigationTimeout(120000);
-    await page.setDefaultTimeout(120000);
 
+    // remove all timeouts
+    page.setDefaultNavigationTimeout(0);
+    page.setDefaultTimeout(0);
+
+    // Open Google Maps search
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    console.log("Opening Maps URL:", mapsUrl);
 
-    await page.waitForSelector("div[role='feed']", { timeout: 30000 });
+    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 0 });
+    console.log("Maps page loaded, waiting for results...");
 
+    // Wait for left-panel results list to appear
+    await page.waitForSelector("div[role='feed']", { timeout: 60000 });
+    console.log("Results panel detected!");
+
+    // Scroll to load enough items
     const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])";
     async function loadEnough(count) {
       for (let tries = 0; tries < 20; tries++) {
         const num = await page.$$eval(resultsSelector, (els) => els.length);
+        console.log(`Loaded items: ${num}`);
         if (num >= count) break;
         await page.evaluate(() => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await sleep(800);
+        await new Promise((r) => setTimeout(r, 800));
       }
     }
     await loadEnough(limit);
@@ -157,7 +180,11 @@ app.post("/api/scrape", auth, async (req, res) => {
     const take = Math.min(items.length, limit);
     const data = [];
 
+    console.log(`Scraping ${take} results...`);
+
     for (let i = 0; i < take; i++) {
+      console.log(`Scraping item ${i + 1} of ${take}...`);
+
       try {
         await items[i].click();
       } catch (e) {
@@ -170,8 +197,9 @@ app.post("/api/scrape", auth, async (req, res) => {
           resultsSelector
         );
       }
-      await sleep(2000);
+      await new Promise((r) => setTimeout(r, 2000));
 
+      // Extract business details
       const place = await page.evaluate(() => {
         const qs = (s) => document.querySelector(s);
         const qsa = (s) => Array.from(document.querySelectorAll(s));
@@ -201,11 +229,15 @@ app.post("/api/scrape", auth, async (req, res) => {
         const rating = ratingNode ? ratingNode.textContent.trim() : null;
 
         const reviewsBtn = qsa("button").find((b) =>
-          (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews")
+          (b.getAttribute("aria-label") || "")
+            .toLowerCase()
+            .includes("reviews")
         );
         let reviews = null;
         if (reviewsBtn) {
-          const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
+          const m = reviewsBtn
+            .getAttribute("aria-label")
+            .match(/([\d,\.]+)/);
           reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
         }
 
@@ -218,40 +250,9 @@ app.post("/api/scrape", auth, async (req, res) => {
         return { name, address, phone, website, description, rating, reviews };
       });
 
-      // Email extraction
-      let email = null;
-      if (place.website) {
-        try {
-          const site = await browser.newPage();
-          await site.goto(place.website, { waitUntil: "domcontentloaded", timeout: 20000 });
-          const html = await site.content();
-          email = extractEmailFromHtml(html);
-
-          if (!email) {
-            const contactHref = await site.evaluate(() => {
-              const anchors = Array.from(document.querySelectorAll("a"));
-              const cand = anchors.find(
-                (a) =>
-                  /contact|support|about/i.test(a.textContent || "") ||
-                  /contact|support/i.test(a.getAttribute("href") || "")
-              );
-              return cand ? cand.getAttribute("href") || "" : null;
-            });
-            if (contactHref) {
-              const url = new URL(contactHref, site.url()).href;
-              await site.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-              const html2 = await site.content();
-              email = extractEmailFromHtml(html2);
-            }
-          }
-
-          await site.close();
-        } catch (e) {}
-      }
-
       data.push({
         name: place.name || "",
-        email: email || "",
+        email: "", // skipping email extraction first (can add back later)
         mobile: place.phone || "",
         address: place.address || "",
         website: place.website || "",
@@ -261,20 +262,12 @@ app.post("/api/scrape", auth, async (req, res) => {
       });
     }
 
+    console.log("Scraping finished!");
     res.json({ success: true, results: data });
   } catch (err) {
-    console.error(err);
+    console.error("SCRAPER ERROR:", err);
     res.json({ success: false, message: err.message });
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
-});
-
-// serve frontend
-app.get("/", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "index.html"));
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
 });
