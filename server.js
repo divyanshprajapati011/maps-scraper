@@ -124,7 +124,6 @@ app.post("/api/scrape", auth, async (req, res) => {
   try {
     console.log("Launching Chromium...");
 
-    // Launch puppeteer with Render-safe flags
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
@@ -145,7 +144,7 @@ app.post("/api/scrape", auth, async (req, res) => {
 
     const page = await browser.newPage();
 
-    // remove all timeouts
+    // disable timeouts
     page.setDefaultNavigationTimeout(0);
     page.setDefaultTimeout(0);
 
@@ -156,7 +155,7 @@ app.post("/api/scrape", auth, async (req, res) => {
     await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 0 });
     console.log("Maps page loaded, waiting for results...");
 
-    // Wait for left-panel results list to appear
+    // Wait for left-panel results list
     await page.waitForSelector("div[role='feed']", { timeout: 60000 });
     console.log("Results panel detected!");
 
@@ -171,8 +170,7 @@ app.post("/api/scrape", auth, async (req, res) => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await new Promise((r) => setTimeout(r, 1500));
-        await page.waitForSelector("h1[aria-level='1'], h1.DUwDvf", { timeout: 10000 });
+        await new Promise((r) => setTimeout(r, 1200));
       }
     }
     await loadEnough(limit);
@@ -186,45 +184,33 @@ app.post("/api/scrape", auth, async (req, res) => {
     for (let i = 0; i < take; i++) {
       console.log(`Scraping item ${i + 1} of ${take}...`);
 
-      try {
-        await items[i].click();
-      } catch (e) {
-        await page.evaluate(
-          (idx, sel) => {
-            const el = document.querySelectorAll(sel)[idx];
-            el && el.click();
-          },
-          i,
-          resultsSelector
-        );
-      }
-      await new Promise((r) => setTimeout(r, 2000));
+      await items[i].click();
+      // wait until business name is visible
+      await page.waitForSelector("h1 span", { timeout: 8000 }).catch(() => {});
 
-      // Extract business details (Updated selectors)
       const place = await page.evaluate(() => {
         const qs = (s) => document.querySelector(s);
         const qsa = (s) => Array.from(document.querySelectorAll(s));
-      
+
         const name =
-          qs("h1[aria-level='1']")?.innerText?.trim() || // new selector for business name
-          qs("h1.DUwDvf")?.innerText?.trim() || null;
-      
+          qs("h1 span")?.innerText?.trim() || null;
+
         const address =
-          qsa("button[data-item-id*='address']")?.[0]?.textContent?.trim() || null;
-      
+          qsa("button[data-item-id*='address']")?.[0]?.innerText?.trim() || null;
+
         const phone =
-          qsa("button[data-item-id*='phone']")?.[0]?.textContent?.trim() || null;
-      
-        let website = qsa("a[data-item-id='authority']")?.[0]?.href || null;
+          qsa("button[data-item-id*='phone']")?.[0]?.innerText?.trim() || null;
+
+        let website =
+          qsa("a[data-item-id='authority']")?.[0]?.href || null;
         if (website && website.includes("http")) {
           website = website.match(/https?:\/\/[^\s"]+/)?.[0] || website;
         }
-      
+
         const rating =
-          qs("span.F7nice")?.textContent?.trim() ||
-          qs("div.F7nice span[aria-hidden='true']")?.textContent?.trim() ||
+          qs("span[aria-label*='stars']")?.innerText?.trim() ||
           null;
-      
+
         let reviews = null;
         const reviewsBtn = qsa("button").find((b) =>
           (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews")
@@ -233,24 +219,22 @@ app.post("/api/scrape", auth, async (req, res) => {
           const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
           reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
         }
-      
+
         const description =
-          qs("div[jsaction*='pane'] div[aria-label][jsan*='description']")?.textContent?.trim() ||
-          qs("div[jsname='bN97Pc']")?.textContent?.trim() ||
+          qs("div[jsaction*='pane'] div[aria-label]")?.innerText?.trim() ||
           null;
-      
+
         return { name, address, phone, website, description, rating, reviews };
       });
 
-
       data.push({
         name: place.name || "",
-        email: "", // skipping email extraction first (can add back later)
+        email: "", // (skip email for speed, can add later)
         mobile: place.phone || "",
         address: place.address || "",
         website: place.website || "",
         description: place.description || "",
-        rating: place.rating ? String(place.rating) : "",
+        rating: place.rating || "",
         reviews: place.reviews || 0,
       });
     }
