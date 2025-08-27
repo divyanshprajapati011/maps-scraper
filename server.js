@@ -1,0 +1,268 @@
+import express from "express";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import bodyParser from "body-parser";
+import cors from "cors";
+import puppeteer from "puppeteer";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+import pool from "./db.js";
+
+dotenv.config();
+const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.static(path.join(__dirname, "public")));
+
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
+
+// --- SQL bootstrap (creates tables if not exist) ---
+async function ensureTables(){
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(50) UNIQUE NOT NULL,
+      email VARCHAR(100) UNIQUE NOT NULL,
+      mobile VARCHAR(20) UNIQUE NOT NULL,
+      password TEXT NOT NULL
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS businesses (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      email TEXT,
+      mobile TEXT,
+      address TEXT,
+      website TEXT,
+      description TEXT,
+      rating NUMERIC,
+      reviews INT,
+      scraped_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+}
+ensureTables().catch(console.error);
+
+// --- Auth middleware ---
+function auth(req,res,next){
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if(!token) return res.status(401).json({success:false, message:"No token"});
+  try{
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload;
+    next();
+  }catch(e){
+    return res.status(401).json({success:false, message:"Invalid token"});
+  }
+}
+
+// --- Routes ---
+app.post("/api/signup", async (req, res) => {
+  const { username, email, mobile, password } = req.body;
+  try {
+    if(!username || !email || !mobile || !password){
+      return res.json({success:false, message:"All fields are required"});
+    }
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      "INSERT INTO users (username,email,mobile,password) VALUES ($1,$2,$3,$4)",
+      [username, email, mobile, hash]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    if (err.code === "23505") {
+      res.json({ success: false, message: "User/email/mobile already exists" });
+    } else {
+      res.json({ success: false, message: "Signup failed" });
+    }
+  }
+});
+
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
+    if (result.rows.length === 0) return res.json({ success: false, message: "User not found" });
+    const user = result.rows[0];
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.json({ success: false, message: "Wrong password" });
+    const token = jwt.sign({ id:user.id, username:user.username }, JWT_SECRET, { expiresIn:"6h" });
+    res.json({ success:true, token });
+  } catch (err) {
+    console.error(err);
+    res.json({ success:false, message:"Login failed" });
+  }
+});
+
+// Helper: extract first email via regex from HTML string
+function extractEmailFromHtml(html){
+  const matches = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+  if(!matches) return null;
+  // filter common fake emails
+  const uniq = Array.from(new Set(matches)).filter(e=>!e.toLowerCase().includes("example."));
+  return uniq[0] || null;
+}
+
+// --- Scrape endpoint (protected) ---
+app.post("/api/scrape", auth, async (req, res) => {
+  const { query, max=20 } = req.body;
+  if(!query) return res.json({success:false, message:"query is required"});
+  const limit = Math.min(Number(max)||20, 100);
+
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox","--disable-setuid-sandbox"]
+    });
+    const page = await browser.newPage();
+
+    // Open Google Maps search
+    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+    await page.goto(mapsUrl, { waitUntil: "networkidle2", timeout: 60000 });
+
+    // Wait for left-panel results list to appear
+    await page.waitForSelector("div[role='feed']", { timeout: 30000 });
+
+    // Scroll to load enough items
+    const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])"; // rough item nodes
+    async function loadEnough(count){
+      let prevCount = 0;
+      for(let tries=0; tries<20; tries++){
+        const num = await page.$$eval(resultsSelector, els => els.length);
+        if(num >= count) break;
+        prevCount = num;
+        await page.evaluate(()=>{
+          const scroller = document.querySelector("div[role='feed']");
+          scroller && scroller.scrollBy(0, 1000);
+        });
+        await page.waitForTimeout(800);
+      }
+    }
+    await loadEnough(limit);
+
+    const items = await page.$$(resultsSelector);
+    const take = Math.min(items.length, limit);
+    const data = [];
+
+    for(let i=0; i<take; i++){
+      try{
+        await items[i].click();
+      }catch(e){
+        // try fallback click
+        await page.evaluate((idx, sel)=>{
+          const el = document.querySelectorAll(sel)[idx];
+          el && el.click();
+        }, i, resultsSelector);
+      }
+      await page.waitFor(2000);
+
+
+      // Extract basic info from the place panel
+      const place = await page.evaluate(()=>{
+        const qs = (s)=>document.querySelector(s);
+        const qsa = (s)=>Array.from(document.querySelectorAll(s));
+        const getBtnText = (attrVal)=> {
+          const btn = qsa("button").find(b=> (b.getAttribute("data-item-id")||"").includes(attrVal));
+          return btn ? btn.textContent.trim() : null;
+        };
+        const getAnchorText = (attrVal)=> {
+          const a = qsa("a").find(a=> (a.getAttribute("data-item-id")||"")===attrVal);
+          return a ? (a.getAttribute("href") || a.textContent.trim()) : null;
+        };
+
+        const name = qs("h1.DUwDvf")?.innerText?.trim() || null;
+        const address = getBtnText("address") || null;
+        const phone = getBtnText("phone:tel") || null;
+        let website = getAnchorText("authority") || null;
+        if(website && website.startsWith("http")) {
+          // ok
+        } else if (website && website.includes("http")) {
+          website = website.match(/https?:\/\/[^\s"]+/)?.[0] || website;
+        }
+
+        // rating & reviews
+        const ratingNode = qs("div.F7nice span[aria-hidden='true']") || qs("span.F7nice");
+        const rating = ratingNode ? ratingNode.textContent.trim() : null;
+        // reviews button sometimes contains like "1,234 Google reviews"
+        const reviewsBtn = qsa("button").find(b=> (b.getAttribute("aria-label")||"").toLowerCase().includes("reviews"));
+        let reviews = null;
+        if(reviewsBtn){
+          const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
+          reviews = m ? parseInt(m[1].replace(/[,.]/g,'')) : null;
+        }
+
+        // description (About)
+        const descCand = qs("div[jsaction*='pane'] div[aria-label][jsan*='description']") || qs("div[aria-level='3']+div font") || qs("div[jsname='bN97Pc']");
+        const description = descCand ? descCand.textContent.trim() : null;
+
+        return { name, address, phone, website, description, rating, reviews };
+      });
+
+      // Email extraction from website (optional)
+      let email = null;
+      if(place.website){
+        try{
+          const site = await browser.newPage();
+          await site.goto(place.website, { waitUntil: "domcontentloaded", timeout: 20000 });
+          const html = await site.content();
+          email = extractEmailFromHtml(html);
+
+          // try to follow "contact" link if no email found
+          if(!email){
+            const contactHref = await site.evaluate(()=>{
+              const anchors = Array.from(document.querySelectorAll("a"));
+              const cand = anchors.find(a=>/contact|support|about/i.test(a.textContent || "") || /contact|support/i.test(a.getAttribute("href")||""));
+              return cand ? (cand.getAttribute("href") || "") : null;
+            });
+            if(contactHref){
+              const url = new URL(contactHref, site.url()).href;
+              await site.goto(url, { waitUntil:"domcontentloaded", timeout: 20000 });
+              const html2 = await site.content();
+              email = extractEmailFromHtml(html2);
+            }
+          }
+
+          await site.close();
+        }catch(e){
+          // ignore
+        }
+      }
+
+      data.push({
+        name: place.name || "",
+        email: email || "",
+        mobile: place.phone || "",
+        address: place.address || "",
+        website: place.website || "",
+        description: place.description || "",
+        rating: place.rating ? String(place.rating) : "",
+        reviews: place.reviews || 0
+      });
+    }
+
+    res.json({success:true, results:data});
+  } catch (err){
+    console.error(err);
+    res.json({success:false, message: err.message});
+  } finally {
+    if(browser) await browser.close().catch(()=>{});
+  }
+});
+
+// Fallback to index.html for root
+app.get("*", (req,res)=>{
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.listen(PORT, ()=> {
+  console.log(`Server running on http://localhost:${PORT}`);
+});

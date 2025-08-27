@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Maps Scraper - Static SPA</title>
+  <style>
+    :root{--bg:#f7fafc;--card:#fff;--accent:#0ea5a4;--muted:#6b7280;--success:#daf6ea}
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{margin:0;background:linear-gradient(180deg,#ffffff 0%,#f3f7fb 100%);color:#111}
+    header{padding:18px 28px;display:flex;align-items:center;gap:24px;border-bottom:1px solid #eef2f7;background:var(--card)}
+    .logo{font-weight:700;font-size:18px;color:var(--accent)}
+    .container{max-width:1100px;margin:28px auto;padding:20px}
+    .card{background:var(--card);border-radius:12px;padding:20px;box-shadow:0 6px 18px rgba(16,24,40,0.06)}
+    .grid{display:grid;grid-template-columns:1fr 380px;gap:20px}
+
+    h1{margin:8px 0 18px;font-size:34px}
+    label{display:block;margin:10px 0 6px;color:var(--muted);font-size:14px}
+    input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:12px;border-radius:8px;border:1px solid #e6edf3;background:#f8fafc}
+    button{cursor:pointer;padding:10px 14px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600}
+    .muted{color:var(--muted)}
+    .nav{display:flex;gap:8px}
+    .nav button{background:transparent;color:var(--accent);border:1px solid #e6edf3;padding:8px 12px}
+
+    .center{display:flex;align-items:center;gap:12px}
+    .success{background:var(--success);padding:12px;border-radius:8px;color:#064e3b}
+    .table-wrap{overflow:auto;margin-top:14px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid #eef2f7;text-align:left}
+    th{background:#fbfdfe;color:#374151}
+
+    .hidden{display:none}
+    .small{font-size:13px;color:var(--muted)}
+    .logo-emoji{font-size:20px;margin-right:8px}
+
+    @media (max-width:900px){.grid{grid-template-columns:1fr}.container{padding:12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo"><span class="logo-emoji">🗺️</span>Maps Scraper</div>
+    <div style="flex:1"></div>
+    <nav class="nav">
+      <button id="nav-home">Home</button>
+      <button id="nav-login">Login</button>
+      <button id="nav-signup">Signup</button>
+      <button id="nav-scraper" class="hidden">Scraper</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <!-- HOME -->
+    <section id="page-home" class="card">
+      <h1>Welcome to Maps Scraper 🚀</h1>
+      <p class="small">This app uses a Node backend with Puppeteer and PostgreSQL (Supabase). Use Signup/Login, then scrape real Google Maps results.</p>
+      <div style="margin-top:18px;display:flex;gap:12px">
+        <button id="home-go-login">🔑 Go to Login</button>
+        <button id="home-go-signup">📝 Create Account</button>
+        <button id="home-open-scraper" class="hidden">➡️ Open Scraper</button>
+      </div>
+    </section>
+
+    <!-- LOGIN -->
+    <section id="page-login" class="card hidden">
+      <div class="center"><h1>Login 🔑</h1></div>
+      <label>Username</label>
+      <input id="login-username" type="text" placeholder="your username">
+      <label>Password</label>
+      <input id="login-password" type="password" placeholder="••••••">
+      <div style="margin-top:14px;display:flex;gap:12px">
+        <button id="btn-login">Login</button>
+        <button id="btn-login-back" style="background:#f3f4f6;color:#111;border:1px solid #e6edf3">⬅️ Back</button>
+      </div>
+      <div id="login-msg" class="small" style="margin-top:12px"></div>
+    </section>
+
+    <!-- SIGNUP -->
+    <section id="page-signup" class="card hidden">
+      <h1>Signup 📝</h1>
+      <label>Choose Username</label>
+      <input id="signup-username" type="text">
+      <label>Email</label>
+      <input id="signup-email" type="text">
+      <label>Mobile</label>
+      <input id="signup-mobile" type="text">
+      <label>Choose Password</label>
+      <input id="signup-password" type="password">
+      <div style="margin-top:14px;display:flex;gap:12px">
+        <button id="btn-signup">Create Account</button>
+        <button id="btn-signup-back" style="background:#f3f4f6;color:#111;border:1px solid #e6edf3">⬅️ Back</button>
+      </div>
+      <div id="signup-msg" class="small" style="margin-top:12px"></div>
+    </section>
+
+    <!-- SCRAPER -->
+    <section id="page-scraper" class="card hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h1>🚀 Google Maps Scraper</h1>
+        <div id="user-info" class="small"></div>
+      </div>
+
+      <label>🔎 Enter query OR Google Search URL OR Google Maps URL</label>
+      <input id="scraper-query" type="text" value="top coaching in Bhopal">
+      <label>Maximum results to fetch</label>
+      <input id="scraper-max" type="number" value="20" min="5" max="100">
+
+      <div style="margin-top:12px;display:flex;gap:12px">
+        <button id="btn-start-scrape">Start Scraping</button>
+        <button id="btn-logout" style="background:#ef4444">🚪 Logout</button>
+      </div>
+
+      <div id="scrape-feedback" style="margin-top:14px"></div>
+
+      <div id="scrape-results" class="hidden">
+        <div style="display:flex;gap:12px;margin-top:12px">
+          <button id="download-csv">⬇️ Download CSV</button>
+        </div>
+        <div class="table-wrap card" style="margin-top:12px;padding:12px">
+          <table id="results-table"><thead><tr>
+            <th>Business Name</th><th>Email</th><th>Mobile</th><th>Address</th><th>Website</th><th>Description</th><th>Rating</th><th>Reviews</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+<script>
+const API_BASE = "";
+
+const pages = {
+  home: document.getElementById('page-home'),
+  login: document.getElementById('page-login'),
+  signup: document.getElementById('page-signup'),
+  scraper: document.getElementById('page-scraper'),
+}
+const navScraper = document.getElementById('nav-scraper')
+function show(page){
+  Object.values(pages).forEach(p => p.classList.add('hidden'))
+  pages[page].classList.remove('hidden')
+  const isAuth = !!localStorage.getItem('token');
+  if(isAuth) navScraper.classList.remove('hidden'); else navScraper.classList.add('hidden')
+  document.getElementById('home-open-scraper').classList.toggle('hidden', !isAuth)
+  document.getElementById('user-info').textContent = isAuth ? "Logged in" : ""
+}
+
+document.getElementById('nav-home').addEventListener('click', ()=> show('home'))
+document.getElementById('nav-login').addEventListener('click', ()=> show('login'))
+document.getElementById('nav-signup').addEventListener('click', ()=> show('signup'))
+navScraper.addEventListener('click', ()=> show('scraper'))
+document.getElementById('home-go-login').addEventListener('click', ()=> show('login'))
+document.getElementById('home-go-signup').addEventListener('click', ()=> show('signup'))
+document.getElementById('home-open-scraper').addEventListener('click', ()=> show('scraper'))
+
+// signup
+document.getElementById('btn-signup').addEventListener('click', async ()=>{
+  const u = document.getElementById('signup-username').value.trim();
+  const e = document.getElementById('signup-email').value.trim();
+  const m = document.getElementById('signup-mobile').value.trim();
+  const p = document.getElementById('signup-password').value;
+  const msg = document.getElementById('signup-msg')
+  if(!u||!e||!m||!p){ msg.textContent='Please fill all fields.'; return }
+  try {
+    const res = await fetch(API_BASE + "/api/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username:u, email:e, mobile:m, password:p })
+    });
+    const data = await res.json();
+    if(data.success){
+      msg.textContent='Signup successful! Redirecting to Login...';
+      setTimeout(()=>{ show('login') },900)
+    } else {
+      msg.textContent=data.message || 'Signup failed';
+    }
+  } catch (err) {
+    msg.textContent='Server error';
+  }
+});
+
+document.getElementById('btn-signup-back').addEventListener('click', ()=> show('home'))
+
+// login
+document.getElementById('btn-login').addEventListener('click', async ()=>{
+  const u = document.getElementById('login-username').value.trim();
+  const p = document.getElementById('login-password').value;
+  const msg = document.getElementById('login-msg')
+  try {
+    const res = await fetch(API_BASE + "/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username:u, password:p })
+    });
+    const data = await res.json();
+    if(data.success){
+      localStorage.setItem('token', data.token);
+      msg.innerHTML = '<div class="success">Login successful! Redirecting to Scraper...</div>';
+      setTimeout(()=>{ show('scraper') }, 700)
+    } else {
+      msg.textContent=data.message || 'Invalid credentials';
+    }
+  } catch (err) {
+    msg.textContent='Server error';
+  }
+});
+
+document.getElementById('btn-login-back').addEventListener('click', ()=> show('home'))
+
+// logout
+document.getElementById('btn-logout').addEventListener('click', ()=>{
+  localStorage.removeItem('token');
+  document.getElementById('scrape-feedback').innerHTML='';
+  document.getElementById('scrape-results').classList.add('hidden')
+  show('home')
+})
+
+// scrape
+document.getElementById('btn-start-scrape').addEventListener('click', async ()=>{
+  const token = localStorage.getItem('token');
+  if(!token){ alert('Please login first'); show('login'); return }
+  const q = document.getElementById('scraper-query').value.trim();
+  const max = parseInt(document.getElementById('scraper-max').value)||20;
+  const fb = document.getElementById('scrape-feedback'); 
+  fb.innerHTML = '<div class="small">Scraping in progress...</div>';
+  document.getElementById('scrape-results').classList.add('hidden')
+  try{
+    const res = await fetch(API_BASE + "/api/scrape", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ query:q, max })
+    });
+    const data = await res.json();
+    if(data.success){
+      renderResults(data.results);
+      fb.innerHTML = `<div class="success">Scraping completed! Found ${data.results.length} results.</div>`;
+    }else{
+      fb.innerHTML = "Error: " + (data.message || "Failed");
+    }
+  }catch(e){
+    fb.innerHTML = "Request failed";
+  }
+});
+
+function renderResults(rows){
+  const tbody = document.querySelector('#results-table tbody'); tbody.innerHTML='';
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escapeHtml(r.name||'')}</td><td>${escapeHtml(r.email||'')}</td><td>${escapeHtml(r.mobile||'')}</td><td>${escapeHtml(r.address||'')}</td><td>${escapeHtml(r.website||'')}</td><td>${escapeHtml(r.description||'')}</td><td>${escapeHtml(r.rating||'')}</td><td>${escapeHtml(r.reviews||'')}</td>`;
+    tbody.appendChild(tr);
+  })
+  document.getElementById('scrape-results').classList.remove('hidden')
+}
+
+function escapeHtml(s){ return (s+'').replace(/[&<>"']/g, c=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]) }
+
+// CSV download
+function convertToCSV(rows){
+  const header = ['Business Name','Email','Mobile','Address','Website','Description','Rating','Reviews'];
+  const lines = [header.join(',')];
+  rows.forEach(r=>{
+    const vals = [r.name,r.email,r.mobile,r.address,r.website,r.description,r.rating,r.reviews].map(v=>`"${(''+(v??'')).replace(/"/g,'""')}"`);
+    lines.push(vals.join(','));
+  })
+  return lines.join('\n');
+}
+
+document.getElementById('download-csv').addEventListener('click', ()=>{
+  const rows = [];
+  document.querySelectorAll('#results-table tbody tr').forEach(tr=>{
+    const tds = tr.querySelectorAll('td');
+    rows.push({name:tds[0].textContent,email:tds[1].textContent,mobile:tds[2].textContent,address:tds[3].textContent,website:tds[4].textContent,description:tds[5].textContent,rating:tds[6].textContent,reviews:tds[7].textContent});
+  })
+  if(rows.length===0){ alert('No results to download'); return }
+  const csv = convertToCSV(rows);
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'maps_scrape.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+})
+
+// init
+(function(){
+  if(localStorage.getItem('token')){ show('scraper'); } else { show('home'); }
+})();
+</script>
+</body>
+</html>
