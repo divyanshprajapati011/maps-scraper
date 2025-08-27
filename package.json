@@ -11,7 +11,7 @@
     "pg": "^8.11.0",
     "jsonwebtoken": "^9.0.0",
     "cors": "^2.8.5",
-    "bcrypt": "^5.1.1",
-    "puppeteer": "^22.0.0"
+    "puppeteer": "^22.0.0",
+    "bcrypt": "^5.1.1"
   }
 }
