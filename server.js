@@ -22,6 +22,9 @@ app.use(express.static(path.join(__dirname, "public")));
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 
+// simple sleep helper
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // --- SQL bootstrap (creates tables if not exist) ---
 async function ensureTables(){
   await pool.query(`
@@ -107,7 +110,6 @@ app.post("/api/login", async (req, res) => {
 function extractEmailFromHtml(html){
   const matches = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
   if(!matches) return null;
-  // filter common fake emails
   const uniq = Array.from(new Set(matches)).filter(e=>!e.toLowerCase().includes("example."));
   return uniq[0] || null;
 }
@@ -120,26 +122,23 @@ app.post("/api/scrape", auth, async (req, res) => {
 
   let browser;
   try {
-    // Launch puppeteer with serverless-compatible chromium
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(), // yaha se Render ka chromium path milega
+      executablePath: await chromium.executablePath(),
       headless: chromium.headless,
       ignoreHTTPSErrors: true
     });
 
-
     const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(120000);
+    await page.setDefaultTimeout(120000);
 
-    // Open Google Maps search
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    await page.goto(mapsUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-    // Wait for left-panel results list to appear
     await page.waitForSelector("div[role='feed']", { timeout: 30000 });
 
-    // Scroll to load enough items
     const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])";
     async function loadEnough(count) {
       for (let tries = 0; tries < 20; tries++) {
@@ -149,7 +148,7 @@ app.post("/api/scrape", auth, async (req, res) => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await new Promise(r => setTimeout(r, 800));
+        await sleep(800);
       }
     }
     await loadEnough(limit);
@@ -171,9 +170,8 @@ app.post("/api/scrape", auth, async (req, res) => {
           resultsSelector
         );
       }
-      await page.waitForTimeout(2000);
+      await sleep(2000);
 
-      // Extract business details
       const place = await page.evaluate(() => {
         const qs = (s) => document.querySelector(s);
         const qsa = (s) => Array.from(document.querySelectorAll(s));
@@ -203,15 +201,11 @@ app.post("/api/scrape", auth, async (req, res) => {
         const rating = ratingNode ? ratingNode.textContent.trim() : null;
 
         const reviewsBtn = qsa("button").find((b) =>
-          (b.getAttribute("aria-label") || "")
-            .toLowerCase()
-            .includes("reviews")
+          (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews")
         );
         let reviews = null;
         if (reviewsBtn) {
-          const m = reviewsBtn
-            .getAttribute("aria-label")
-            .match(/([\d,\.]+)/);
+          const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
           reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
         }
 
@@ -229,10 +223,7 @@ app.post("/api/scrape", auth, async (req, res) => {
       if (place.website) {
         try {
           const site = await browser.newPage();
-          await site.goto(place.website, {
-            waitUntil: "domcontentloaded",
-            timeout: 20000,
-          });
+          await site.goto(place.website, { waitUntil: "domcontentloaded", timeout: 20000 });
           const html = await site.content();
           email = extractEmailFromHtml(html);
 
@@ -248,10 +239,7 @@ app.post("/api/scrape", auth, async (req, res) => {
             });
             if (contactHref) {
               const url = new URL(contactHref, site.url()).href;
-              await site.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout: 20000,
-              });
+              await site.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
               const html2 = await site.content();
               email = extractEmailFromHtml(html2);
             }
