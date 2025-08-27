@@ -157,7 +157,7 @@ app.post("/api/scrape", auth, async (req, res) => {
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
     console.log("Opening Maps URL:", mapsUrl);
 
-    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 0 });
 
     // Try to dismiss consent/geo banners quietly
     try {
@@ -170,7 +170,7 @@ app.post("/api/scrape", auth, async (req, res) => {
 
     // Wait for the results feed to appear
     const FEED = "div[role='feed']";
-    await page.waitForSelector(FEED, { timeout: 60000 });
+    await page.waitForSelector(FEED, { timeout: 120000 });
     console.log("Results feed detected");
 
     // Helper: scroll the left feed to load more cards
