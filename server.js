@@ -22,11 +22,8 @@ app.use(express.static(path.join(__dirname, "public")));
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 
-// simple sleep helper
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// --- SQL bootstrap (creates tables if not exist) ---
-async function ensureTables(){
+// --- SQL bootstrap ---
+async function ensureTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -36,43 +33,29 @@ async function ensureTables(){
       password TEXT NOT NULL
     );
   `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS businesses (
-      id SERIAL PRIMARY KEY,
-      name TEXT,
-      email TEXT,
-      mobile TEXT,
-      address TEXT,
-      website TEXT,
-      description TEXT,
-      rating NUMERIC,
-      reviews INT,
-      scraped_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
 }
 ensureTables().catch(console.error);
 
 // --- Auth middleware ---
-function auth(req,res,next){
+function auth(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if(!token) return res.status(401).json({success:false, message:"No token"});
-  try{
+  if (!token) return res.status(401).json({ success: false, message: "No token" });
+  try {
     const payload = jwt.verify(token, JWT_SECRET);
     req.user = payload;
     next();
-  }catch(e){
-    return res.status(401).json({success:false, message:"Invalid token"});
+  } catch (e) {
+    return res.status(401).json({ success: false, message: "Invalid token" });
   }
 }
 
-// --- Routes ---
+// --- Signup ---
 app.post("/api/signup", async (req, res) => {
   const { username, email, mobile, password } = req.body;
   try {
-    if(!username || !email || !mobile || !password){
-      return res.json({success:false, message:"All fields are required"});
+    if (!username || !email || !mobile || !password) {
+      return res.json({ success: false, message: "All fields are required" });
     }
     const hash = await bcrypt.hash(password, 10);
     await pool.query(
@@ -90,6 +73,7 @@ app.post("/api/signup", async (req, res) => {
   }
 });
 
+// --- Login ---
 app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -98,79 +82,57 @@ app.post("/api/login", async (req, res) => {
     const user = result.rows[0];
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.json({ success: false, message: "Wrong password" });
-    const token = jwt.sign({ id:user.id, username:user.username }, JWT_SECRET, { expiresIn:"6h" });
-    res.json({ success:true, token });
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "6h" });
+    res.json({ success: true, token });
   } catch (err) {
     console.error(err);
-    res.json({ success:false, message:"Login failed" });
+    res.json({ success: false, message: "Login failed" });
   }
 });
 
-// Helper: extract first email via regex from HTML string
-function extractEmailFromHtml(html){
-  const matches = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-  if(!matches) return null;
-  const uniq = Array.from(new Set(matches)).filter(e=>!e.toLowerCase().includes("example."));
-  return uniq[0] || null;
-}
-
-// scrape route
+// --- Scrape Route (FAST) ---
 app.post("/api/scrape", auth, async (req, res) => {
   const { query, max = 20 } = req.body;
   if (!query) return res.json({ success: false, message: "query is required" });
-  const limit = Math.min(Number(max) || 20, 100);
+  const limit = Math.min(Number(max) || 20, 50);
 
   let browser;
   try {
-    console.log("Launching Chromium...");
-
+    console.log("🚀 Launching Chromium...");
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--single-process",
-        "--disable-gpu",
       ],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+      headless: true,
     });
 
     const page = await browser.newPage();
-
-    // disable timeouts
     page.setDefaultNavigationTimeout(0);
-    page.setDefaultTimeout(0);
 
-    // Open Google Maps search
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-    console.log("Opening Maps URL:", mapsUrl);
+    console.log("🌍 Opening:", mapsUrl);
 
-    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 0 });
-    console.log("Maps page loaded, waiting for results...");
-
-    // Wait for left-panel results list
+    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForSelector("div[role='feed']", { timeout: 60000 });
-    console.log("Results panel detected!");
 
-    // Scroll to load enough items
-    const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])";
+    console.log("✅ Results detected!");
+
+    const resultsSelector = "div[role='feed'] > div[jscontroller]";
     async function loadEnough(count) {
-      for (let tries = 0; tries < 20; tries++) {
-        const num = await page.$$eval(resultsSelector, (els) => els.length);
-        console.log(`Loaded items: ${num}`);
+      for (let tries = 0; tries < 15; tries++) {
+        const num = await page.$$eval(resultsSelector, els => els.length);
+        console.log(`📊 Loaded: ${num}`);
         if (num >= count) break;
         await page.evaluate(() => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, 1000));
       }
     }
     await loadEnough(limit);
@@ -179,72 +141,68 @@ app.post("/api/scrape", auth, async (req, res) => {
     const take = Math.min(items.length, limit);
     const data = [];
 
-    console.log(`Scraping ${take} results...`);
+    console.log(`🔍 Scraping ${take} results...`);
 
     for (let i = 0; i < take; i++) {
-      console.log(`Scraping item ${i + 1} of ${take}...`);
+      console.log(`➡️ Item ${i + 1}`);
 
       await items[i].click();
-      // wait until business name is visible
-      await page.waitForSelector("h1 span", { timeout: 8000 }).catch(() => {});
+      await page.waitForSelector("h1[aria-level='1'], h1.DUwDvf", { timeout: 15000 });
 
       const place = await page.evaluate(() => {
-        const qs = (s) => document.querySelector(s);
-        const qsa = (s) => Array.from(document.querySelectorAll(s));
+        const qs = s => document.querySelector(s);
+        const qsa = s => Array.from(document.querySelectorAll(s));
 
         const name =
-          qs("h1 span")?.innerText?.trim() || null;
+          qs("h1[aria-level='1']")?.innerText?.trim() ||
+          qs("h1.DUwDvf")?.innerText?.trim() || "";
 
         const address =
-          qsa("button[data-item-id*='address']")?.[0]?.innerText?.trim() || null;
+          qsa("button[data-item-id*='address']")?.[0]?.textContent?.trim() || "";
 
         const phone =
-          qsa("button[data-item-id*='phone']")?.[0]?.innerText?.trim() || null;
+          qsa("button[data-item-id*='phone']")?.[0]?.textContent?.trim() || "";
 
-        let website =
-          qsa("a[data-item-id='authority']")?.[0]?.href || null;
+        let website = qsa("a[data-item-id='authority']")?.[0]?.href || "";
         if (website && website.includes("http")) {
           website = website.match(/https?:\/\/[^\s"]+/)?.[0] || website;
         }
 
         const rating =
-          qs("span[aria-label*='stars']")?.innerText?.trim() ||
-          null;
+          qs("span.F7nice")?.textContent?.trim() ||
+          qs("div.F7nice span[aria-hidden='true']")?.textContent?.trim() || "";
 
-        let reviews = null;
-        const reviewsBtn = qsa("button").find((b) =>
+        let reviews = "";
+        const reviewsBtn = qsa("button").find(b =>
           (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews")
         );
         if (reviewsBtn) {
           const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
-          reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
+          reviews = m ? m[1].replace(/[,.]/g, "") : "";
         }
 
-        const description =
-          qs("div[jsaction*='pane'] div[aria-label]")?.innerText?.trim() ||
-          null;
-
-        return { name, address, phone, website, description, rating, reviews };
+        return { name, address, phone, website, rating, reviews };
       });
 
-      data.push({
-        name: place.name || "",
-        email: "", // (skip email for speed, can add later)
-        mobile: place.phone || "",
-        address: place.address || "",
-        website: place.website || "",
-        description: place.description || "",
-        rating: place.rating || "",
-        reviews: place.reviews || 0,
-      });
+      data.push(place);
+      await new Promise(r => setTimeout(r, 1000));
     }
 
-    console.log("Scraping finished!");
+    console.log("✅ Scraping finished!");
     res.json({ success: true, results: data });
   } catch (err) {
-    console.error("SCRAPER ERROR:", err);
+    console.error("❌ SCRAPER ERROR:", err);
     res.json({ success: false, message: err.message });
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
+});
+
+// --- Serve frontend ---
+app.get("/", (req, res) => {
+  res.sendFile(path.join(process.cwd(), "index.html"));
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
 });
