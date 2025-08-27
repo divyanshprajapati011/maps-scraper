@@ -125,10 +125,11 @@ app.post("/api/scrape", auth, async (req, res) => {
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
+      executablePath: await chromium.executablePath(), // yaha se Render ka chromium path milega
       headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+      ignoreHTTPSErrors: true
     });
+
 
     const page = await browser.newPage();
 
