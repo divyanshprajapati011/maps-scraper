@@ -8,7 +8,8 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import pool from "./db.js";
-
+import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 
 dotenv.config();
 const app = express();
@@ -112,18 +113,23 @@ function extractEmailFromHtml(html){
   return uniq[0] || null;
 }
 
-// --- Scrape endpoint (protected) ---
+// scrape route
 app.post("/api/scrape", auth, async (req, res) => {
-  const { query, max=20 } = req.body;
-  if(!query) return res.json({success:false, message:"query is required"});
-  const limit = Math.min(Number(max)||20, 100);
+  const { query, max = 20 } = req.body;
+  if (!query) return res.json({ success: false, message: "query is required" });
+  const limit = Math.min(Number(max) || 20, 100);
 
   let browser;
   try {
+    // Launch puppeteer with serverless-compatible chromium
     browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox","--disable-setuid-sandbox"]
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
     });
+
     const page = await browser.newPage();
 
     // Open Google Maps search
@@ -134,14 +140,12 @@ app.post("/api/scrape", auth, async (req, res) => {
     await page.waitForSelector("div[role='feed']", { timeout: 30000 });
 
     // Scroll to load enough items
-    const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])"; // rough item nodes
-    async function loadEnough(count){
-      let prevCount = 0;
-      for(let tries=0; tries<20; tries++){
-        const num = await page.$$eval(resultsSelector, els => els.length);
-        if(num >= count) break;
-        prevCount = num;
-        await page.evaluate(()=>{
+    const resultsSelector = "div[role='feed'] > div:not([jscontroller*='lxa'])";
+    async function loadEnough(count) {
+      for (let tries = 0; tries < 20; tries++) {
+        const num = await page.$$eval(resultsSelector, (els) => els.length);
+        if (num >= count) break;
+        await page.evaluate(() => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
@@ -154,88 +158,107 @@ app.post("/api/scrape", auth, async (req, res) => {
     const take = Math.min(items.length, limit);
     const data = [];
 
-    for(let i=0; i<take; i++){
-      try{
+    for (let i = 0; i < take; i++) {
+      try {
         await items[i].click();
-      }catch(e){
-        // try fallback click
-        await page.evaluate((idx, sel)=>{
-          const el = document.querySelectorAll(sel)[idx];
-          el && el.click();
-        }, i, resultsSelector);
+      } catch (e) {
+        await page.evaluate(
+          (idx, sel) => {
+            const el = document.querySelectorAll(sel)[idx];
+            el && el.click();
+          },
+          i,
+          resultsSelector
+        );
       }
-      await page.waitFor(2000);
+      await page.waitForTimeout(2000);
 
-
-      // Extract basic info from the place panel
-      const place = await page.evaluate(()=>{
-        const qs = (s)=>document.querySelector(s);
-        const qsa = (s)=>Array.from(document.querySelectorAll(s));
-        const getBtnText = (attrVal)=> {
-          const btn = qsa("button").find(b=> (b.getAttribute("data-item-id")||"").includes(attrVal));
+      // Extract business details
+      const place = await page.evaluate(() => {
+        const qs = (s) => document.querySelector(s);
+        const qsa = (s) => Array.from(document.querySelectorAll(s));
+        const getBtnText = (attrVal) => {
+          const btn = qsa("button").find((b) =>
+            (b.getAttribute("data-item-id") || "").includes(attrVal)
+          );
           return btn ? btn.textContent.trim() : null;
         };
-        const getAnchorText = (attrVal)=> {
-          const a = qsa("a").find(a=> (a.getAttribute("data-item-id")||"")===attrVal);
-          return a ? (a.getAttribute("href") || a.textContent.trim()) : null;
+        const getAnchorText = (attrVal) => {
+          const a = qsa("a").find(
+            (a) => (a.getAttribute("data-item-id") || "") === attrVal
+          );
+          return a ? a.getAttribute("href") || a.textContent.trim() : null;
         };
 
         const name = qs("h1.DUwDvf")?.innerText?.trim() || null;
         const address = getBtnText("address") || null;
         const phone = getBtnText("phone:tel") || null;
         let website = getAnchorText("authority") || null;
-        if(website && website.startsWith("http")) {
-          // ok
-        } else if (website && website.includes("http")) {
+        if (website && website.includes("http")) {
           website = website.match(/https?:\/\/[^\s"]+/)?.[0] || website;
         }
 
-        // rating & reviews
-        const ratingNode = qs("div.F7nice span[aria-hidden='true']") || qs("span.F7nice");
+        const ratingNode =
+          qs("div.F7nice span[aria-hidden='true']") || qs("span.F7nice");
         const rating = ratingNode ? ratingNode.textContent.trim() : null;
-        // reviews button sometimes contains like "1,234 Google reviews"
-        const reviewsBtn = qsa("button").find(b=> (b.getAttribute("aria-label")||"").toLowerCase().includes("reviews"));
+
+        const reviewsBtn = qsa("button").find((b) =>
+          (b.getAttribute("aria-label") || "")
+            .toLowerCase()
+            .includes("reviews")
+        );
         let reviews = null;
-        if(reviewsBtn){
-          const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
-          reviews = m ? parseInt(m[1].replace(/[,.]/g,'')) : null;
+        if (reviewsBtn) {
+          const m = reviewsBtn
+            .getAttribute("aria-label")
+            .match(/([\d,\.]+)/);
+          reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
         }
 
-        // description (About)
-        const descCand = qs("div[jsaction*='pane'] div[aria-label][jsan*='description']") || qs("div[aria-level='3']+div font") || qs("div[jsname='bN97Pc']");
+        const descCand =
+          qs("div[jsaction*='pane'] div[aria-label][jsan*='description']") ||
+          qs("div[aria-level='3']+div font") ||
+          qs("div[jsname='bN97Pc']");
         const description = descCand ? descCand.textContent.trim() : null;
 
         return { name, address, phone, website, description, rating, reviews };
       });
 
-      // Email extraction from website (optional)
+      // Email extraction
       let email = null;
-      if(place.website){
-        try{
+      if (place.website) {
+        try {
           const site = await browser.newPage();
-          await site.goto(place.website, { waitUntil: "domcontentloaded", timeout: 20000 });
+          await site.goto(place.website, {
+            waitUntil: "domcontentloaded",
+            timeout: 20000,
+          });
           const html = await site.content();
           email = extractEmailFromHtml(html);
 
-          // try to follow "contact" link if no email found
-          if(!email){
-            const contactHref = await site.evaluate(()=>{
+          if (!email) {
+            const contactHref = await site.evaluate(() => {
               const anchors = Array.from(document.querySelectorAll("a"));
-              const cand = anchors.find(a=>/contact|support|about/i.test(a.textContent || "") || /contact|support/i.test(a.getAttribute("href")||""));
-              return cand ? (cand.getAttribute("href") || "") : null;
+              const cand = anchors.find(
+                (a) =>
+                  /contact|support|about/i.test(a.textContent || "") ||
+                  /contact|support/i.test(a.getAttribute("href") || "")
+              );
+              return cand ? cand.getAttribute("href") || "" : null;
             });
-            if(contactHref){
+            if (contactHref) {
               const url = new URL(contactHref, site.url()).href;
-              await site.goto(url, { waitUntil:"domcontentloaded", timeout: 20000 });
+              await site.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: 20000,
+              });
               const html2 = await site.content();
               email = extractEmailFromHtml(html2);
             }
           }
 
           await site.close();
-        }catch(e){
-          // ignore
-        }
+        } catch (e) {}
       }
 
       data.push({
@@ -246,22 +269,26 @@ app.post("/api/scrape", auth, async (req, res) => {
         website: place.website || "",
         description: place.description || "",
         rating: place.rating ? String(place.rating) : "",
-        reviews: place.reviews || 0
+        reviews: place.reviews || 0,
       });
     }
 
-    res.json({success:true, results:data});
-  } catch (err){
+    res.json({ success: true, results: data });
+  } catch (err) {
     console.error(err);
-    res.json({success:false, message: err.message});
+    res.json({ success: false, message: err.message });
   } finally {
-    if(browser) await browser.close().catch(()=>{});
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
-// Fallback to index.html for root
+// serve frontend
 app.get("/", (req, res) => {
   res.sendFile(path.join(process.cwd(), "index.html"));
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
 });
 
 app.listen(PORT, ()=> {
