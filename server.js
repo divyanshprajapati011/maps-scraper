@@ -149,7 +149,7 @@ app.post("/api/scrape", auth, async (req, res) => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await page.waitForTimeout(800);
+        await new Promise(r => setTimeout(r, 800));
       }
     }
     await loadEnough(limit);
