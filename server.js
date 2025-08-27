@@ -113,7 +113,6 @@ function extractEmailFromHtml(html){
   const uniq = Array.from(new Set(matches)).filter(e=>!e.toLowerCase().includes("example."));
   return uniq[0] || null;
 }
-
 // scrape route
 app.post("/api/scrape", auth, async (req, res) => {
   const { query, max = 20 } = req.body;
@@ -131,11 +130,10 @@ app.post("/api/scrape", auth, async (req, res) => {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
+        "--disable-gpu",
         "--no-first-run",
         "--no-zygote",
-        "--single-process",
-        "--disable-gpu",
+        // DO NOT use "--single-process" on Render/Vercel; it causes WS endpoint timeout
       ],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
@@ -145,163 +143,172 @@ app.post("/api/scrape", auth, async (req, res) => {
 
     const page = await browser.newPage();
 
+    // Make headless look more like real Chrome
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+    );
+    await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+
     // remove all timeouts
     page.setDefaultNavigationTimeout(0);
     page.setDefaultTimeout(0);
 
-   // Open Google Maps search
-const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-console.log("Opening Maps URL:", mapsUrl);
+    // Open Google Maps search
+    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+    console.log("Opening Maps URL:", mapsUrl);
 
-await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.goto(mapsUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-// Try to dismiss consent/geo banners quietly
-try {
-  await page.waitForSelector('form[action*="consent"] button, button[aria-label*="Accept"]', { timeout: 5000 });
-  await page.evaluate(() => {
-    const b = document.querySelector('form[action*="consent"] button, button[aria-label*="Accept"]');
-    b && b.click();
-  });
-} catch {}
+    // Try to dismiss consent/geo banners quietly
+    try {
+      await page.waitForSelector('form[action*="consent"] button, button[aria-label*="Accept"]', { timeout: 5000 });
+      await page.evaluate(() => {
+        const b = document.querySelector('form[action*="consent"] button, button[aria-label*="Accept"]');
+        b && b.click();
+      });
+    } catch {}
 
-// Wait for the results feed to appear
-const FEED = "div[role='feed']";
-await page.waitForSelector(FEED, { timeout: 60000 });
-console.log("Results feed detected");
+    // Wait for the results feed to appear
+    const FEED = "div[role='feed']";
+    await page.waitForSelector(FEED, { timeout: 60000 });
+    console.log("Results feed detected");
 
-// Helper: scroll the left feed to load more cards
-async function loadEnough(count) {
-  let seen = 0;
-  let stagnant = 0;
-  for (let i = 0; i < 40; i++) {
-    // count anchors that point to /maps/place/ (works on new UI)
-    const n = await page.$$eval(`${FEED} a[href*="/maps/place/"]`, els => els.length);
-    console.log("loaded cards:", n);
-    if (n >= count) return;
+    // Helper: scroll the left feed to load more cards
+    async function loadEnough(count) {
+      let seen = 0;
+      let stagnant = 0;
+      for (let i = 0; i < 40; i++) {
+        const n = await page.$$eval(`${FEED} a[href*="/maps/place/"]`, els => els.length);
+        console.log("loaded cards:", n);
+        if (n >= count) return;
 
-    await page.evaluate((sel) => {
-      const feed = document.querySelector(sel);
-      if (feed) feed.scrollBy(0, 1000);
-      window.scrollBy(0, 100); // fallback
-    }, FEED);
+        await page.evaluate((sel) => {
+          const feed = document.querySelector(sel);
+          if (feed) feed.scrollBy(0, 1000);
+          window.scrollBy(0, 100); // fallback
+        }, FEED);
 
-    await sleep(1200);
+        await sleep(1200);
 
-    if (n === seen) stagnant++; else stagnant = 0;
-    seen = n;
-    if (stagnant >= 6) return; // nothing new is loading
-  }
-}
-
-await loadEnough(limit);
-
-// Now collect items (we will re-query every iteration to avoid stale handles)
-const data = [];
-const take = Math.min(
-  await page.$$eval(`${FEED} a[href*="/maps/place/"]`, els => els.length),
-  limit
-);
-
-console.log(`Scraping up to ${take} results...`);
-
-let lastName = null;
-for (let i = 0; i < take; i++) {
-  console.log(`Item ${i + 1}/${take}`);
-
-  // Re-query each loop so we don't hold stale element handles
-  const clicked = await page.evaluate((sel, index) => {
-    const list = Array.from(document.querySelectorAll(`${sel} a[href*="/maps/place/"]`));
-    const el = list[index];
-    if (el) {
-      el.scrollIntoView({ block: "center" });
-      (el as HTMLElement).click();
-      return true;
-    }
-    return false;
-  }, FEED, i);
-
-  if (!clicked) continue;
-
-  await page.waitForTimeout(1500);
-
-  // Wait for place header (business name) to appear
-  let name = "";
-  try {
-    await page.waitForSelector("h1.DUwDvf, h1[aria-level='1']", { timeout: 15000 });
-    name = await page.evaluate(() => {
-      const a = document.querySelector("h1.DUwDvf")?.textContent?.trim();
-      const b = document.querySelector('h1[aria-level="1"]')?.textContent?.trim();
-      return a || b || "";
-    });
-  } catch {
-    console.log("No name found, skipping");
-    continue;
-  }
-
-  if (!name || name === lastName) {
-    console.log("Duplicate/empty name, skipping");
-    continue;
-  }
-  lastName = name;
-
-  // Extract details safely from the details pane
-  const place = await page.evaluate(() => {
-    const qs  = (s) => document.querySelector(s);
-    const qsa = (s) => Array.from(document.querySelectorAll(s));
-
-    const pickText = (el) => (el && (el.textContent || "").trim()) || "";
-
-    const name =
-      pickText(qs("h1.DUwDvf")) ||
-      pickText(qs('h1[aria-level="1"]'));
-
-    const address = pickText(qs('button[data-item-id*="address"]'));
-
-    const phoneBtn = qsa('button[data-item-id*="phone"]').find(Boolean);
-    const phone = pickText(phoneBtn);
-
-    let website = (qs('a[data-item-id="authority"]')?.getAttribute("href")) || "";
-    if (website && website.includes("http")) {
-      const m = website.match(/https?:\/\/[^\s"]+/);
-      if (m) website = m[0];
+        if (n === seen) stagnant++; else stagnant = 0;
+        seen = n;
+        if (stagnant >= 6) return; // nothing new is loading
+      }
     }
 
-    // rating
-    let rating = "";
-    const r1 = qs("span.F7nice");
-    if (r1) rating = pickText(r1);
+    await loadEnough(limit);
 
-    // reviews (parse from aria-label if present)
-    let reviews = 0;
-    const revBtn = qsa("button").find(b => (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews"));
-    if (revBtn) {
-      const m = (revBtn.getAttribute("aria-label") || "").match(/[\d,\.]+/);
-      if (m) reviews = parseInt(m[0].replace(/[,\.\s]/g, ""), 10);
+    // Now collect items
+    const data = [];
+    const take = Math.min(
+      await page.$$eval(`${FEED} a[href*="/maps/place/"]`, els => els.length),
+      limit
+    );
+
+    console.log(`Scraping up to ${take} results...`);
+
+    let lastName = null;
+    for (let i = 0; i < take; i++) {
+      console.log(`Item ${i + 1}/${take}`);
+
+      // Re-query each loop so we don't hold stale element handles
+      const clicked = await page.evaluate((sel, index) => {
+        const list = Array.from(document.querySelectorAll(`${sel} a[href*="/maps/place/"]`));
+        const el = list[index];
+        if (el) {
+          el.scrollIntoView({ block: "center" });
+          el.click();
+          return true;
+        }
+        return false;
+      }, FEED, i);
+
+      if (!clicked) continue;
+
+      await page.waitForTimeout(1500);
+
+      // Wait for place header (business name) to appear
+      let name = "";
+      try {
+        await page.waitForSelector("h1.DUwDvf, h1[aria-level='1']", { timeout: 15000 });
+        name = await page.evaluate(() => {
+          const a = document.querySelector("h1.DUwDvf")?.textContent?.trim();
+          const b = document.querySelector('h1[aria-level="1"]')?.textContent?.trim();
+          return a || b || "";
+        });
+      } catch {
+        console.log("No name found, skipping");
+        continue;
+      }
+
+      if (!name || name === lastName) {
+        console.log("Duplicate/empty name, skipping");
+        continue;
+      }
+      lastName = name;
+
+      // Extract details safely
+      const place = await page.evaluate(() => {
+        const qs = (s) => document.querySelector(s);
+        const qsa = (s) => Array.from(document.querySelectorAll(s));
+
+        const pickText = (el) => (el && (el.textContent || "").trim()) || "";
+
+        const name =
+          pickText(qs("h1.DUwDvf")) ||
+          pickText(qs('h1[aria-level="1"]'));
+
+        const address = pickText(qs('button[data-item-id*="address"]'));
+
+        const phoneBtn = qsa('button[data-item-id*="phone"]').find(Boolean);
+        const phone = pickText(phoneBtn);
+
+        let website = (qs('a[data-item-id="authority"]')?.getAttribute("href")) || "";
+        if (website && website.includes("http")) {
+          const m = website.match(/https?:\/\/[^\s"]+/);
+          if (m) website = m[0];
+        }
+
+        // rating
+        let rating = "";
+        const r1 = qs("span.F7nice");
+        if (r1) rating = pickText(r1);
+
+        // reviews
+        let reviews = 0;
+        const revBtn = qsa("button").find(b => (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews"));
+        if (revBtn) {
+          const m = (revBtn.getAttribute("aria-label") || "").match(/[\d,\.]+/);
+          if (m) reviews = parseInt(m[0].replace(/[,\.\s]/g, ""), 10);
+        }
+
+        // description
+        const desc =
+          pickText(qs("div[jsaction*='pane'] div[aria-label][jsan*='description']")) ||
+          pickText(qs("div[jsname='bN97Pc']"));
+
+        return { name, address, phone, website, description: desc, rating, reviews };
+      });
+
+      data.push({
+        name: place.name || "",
+        email: "", // can crawl website later
+        mobile: place.phone || "",
+        address: place.address || "",
+        website: place.website || "",
+        description: place.description || "",
+        rating: place.rating ? String(place.rating) : "",
+        reviews: place.reviews || 0,
+      });
     }
 
-    // description (if present in the pane)
-    const desc =
-      pickText(qs("div[jsaction*='pane'] div[aria-label][jsan*='description']")) ||
-      pickText(qs("div[jsname='bN97Pc']"));
+    console.log("Scraping finished!");
+    res.json({ success: true, results: data });
 
-    return { name, address, phone, website, description: desc, rating, reviews };
-  });
-
-  data.push({
-    name: place.name || "",
-    email: "", // (optional) you can add website crawling later
-    mobile: place.phone || "",
-    address: place.address || "",
-    website: place.website || "",
-    description: place.description || "",
-    rating: place.rating ? String(place.rating) : "",
-    reviews: place.reviews || 0,
-  });
-}
-
-console.log("Scraping finished!");
-res.json({ success: true, results: data });
-
+  } catch (err) {
+    console.error("SCRAPER ERROR:", err);
+    res.json({ success: false, message: err.message });
+  } finally {
     if (browser) await browser.close().catch(() => {});
   }
 });
