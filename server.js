@@ -3,7 +3,6 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import bodyParser from "body-parser";
 import cors from "cors";
-import puppeteer from "puppeteer";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
