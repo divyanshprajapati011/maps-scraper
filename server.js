@@ -171,7 +171,8 @@ app.post("/api/scrape", auth, async (req, res) => {
           const scroller = document.querySelector("div[role='feed']");
           scroller && scroller.scrollBy(0, 1000);
         });
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, 1500));
+        await page.waitForSelector("h1[aria-level='1'], h1.DUwDvf", { timeout: 10000 });
       }
     }
     await loadEnough(limit);
@@ -199,56 +200,48 @@ app.post("/api/scrape", auth, async (req, res) => {
       }
       await new Promise((r) => setTimeout(r, 2000));
 
-      // Extract business details
+      // Extract business details (Updated selectors)
       const place = await page.evaluate(() => {
         const qs = (s) => document.querySelector(s);
         const qsa = (s) => Array.from(document.querySelectorAll(s));
-        const getBtnText = (attrVal) => {
-          const btn = qsa("button").find((b) =>
-            (b.getAttribute("data-item-id") || "").includes(attrVal)
-          );
-          return btn ? btn.textContent.trim() : null;
-        };
-        const getAnchorText = (attrVal) => {
-          const a = qsa("a").find(
-            (a) => (a.getAttribute("data-item-id") || "") === attrVal
-          );
-          return a ? a.getAttribute("href") || a.textContent.trim() : null;
-        };
-
-        const name = qs("h1.DUwDvf")?.innerText?.trim() || null;
-        const address = getBtnText("address") || null;
-        const phone = getBtnText("phone:tel") || null;
-        let website = getAnchorText("authority") || null;
+      
+        const name =
+          qs("h1[aria-level='1']")?.innerText?.trim() || // new selector for business name
+          qs("h1.DUwDvf")?.innerText?.trim() || null;
+      
+        const address =
+          qsa("button[data-item-id*='address']")?.[0]?.textContent?.trim() || null;
+      
+        const phone =
+          qsa("button[data-item-id*='phone']")?.[0]?.textContent?.trim() || null;
+      
+        let website = qsa("a[data-item-id='authority']")?.[0]?.href || null;
         if (website && website.includes("http")) {
           website = website.match(/https?:\/\/[^\s"]+/)?.[0] || website;
         }
-
-        const ratingNode =
-          qs("div.F7nice span[aria-hidden='true']") || qs("span.F7nice");
-        const rating = ratingNode ? ratingNode.textContent.trim() : null;
-
-        const reviewsBtn = qsa("button").find((b) =>
-          (b.getAttribute("aria-label") || "")
-            .toLowerCase()
-            .includes("reviews")
-        );
+      
+        const rating =
+          qs("span.F7nice")?.textContent?.trim() ||
+          qs("div.F7nice span[aria-hidden='true']")?.textContent?.trim() ||
+          null;
+      
         let reviews = null;
+        const reviewsBtn = qsa("button").find((b) =>
+          (b.getAttribute("aria-label") || "").toLowerCase().includes("reviews")
+        );
         if (reviewsBtn) {
-          const m = reviewsBtn
-            .getAttribute("aria-label")
-            .match(/([\d,\.]+)/);
+          const m = reviewsBtn.getAttribute("aria-label").match(/([\d,\.]+)/);
           reviews = m ? parseInt(m[1].replace(/[,.]/g, "")) : null;
         }
-
-        const descCand =
-          qs("div[jsaction*='pane'] div[aria-label][jsan*='description']") ||
-          qs("div[aria-level='3']+div font") ||
-          qs("div[jsname='bN97Pc']");
-        const description = descCand ? descCand.textContent.trim() : null;
-
+      
+        const description =
+          qs("div[jsaction*='pane'] div[aria-label][jsan*='description']")?.textContent?.trim() ||
+          qs("div[jsname='bN97Pc']")?.textContent?.trim() ||
+          null;
+      
         return { name, address, phone, website, description, rating, reviews };
       });
+
 
       data.push({
         name: place.name || "",
